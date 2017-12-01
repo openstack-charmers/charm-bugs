@@ -1,0 +1,327 @@
+#!/usr/bin/python
+
+import argparse
+import sys
+
+from prettytable import PrettyTable
+from launchpadlib.launchpad import Launchpad
+from ubuntutools.logger import Logger
+from jinja2 import Environment, FileSystemLoader
+
+OPENSTACK_CHARMS = "openstack-charms"
+DISTRO = 'charms'
+
+class Error(Exception):
+    """
+    Error
+    """
+
+    def __str__(self):
+        doc = self.__doc__.strip()
+        return ': '.join([doc] + [str(a) for a in self.args])
+
+
+def release(lp, charms, charmers, args):
+    """Mark any bug tasks with status 'Fix Committed' targetted to the provided milestone
+    as 'Fix Released'"""
+    if not args.milestone:
+        raise Error('Please provide a milestone')
+    milestone = charms.getMilestone(name=str(args.milestone))
+    if not milestone:
+        raise Error('Unable to find milestone %s' % args.milestone)
+    tasks = charms.searchTasks(milestone=milestone, status="Fix Committed")
+    for btask in tasks:
+        Logger.normal('Marking bug %s as Fix Released', btask)
+        btask.status = 'Fix Released'
+        btask.lp_save()
+
+
+def contributors(lp, charms, charmers, args):
+    if not args.milestone:
+        raise Error('Please provide a milestone')
+    milestone = charms.getMilestone(name=str(args.milestone))
+    if not milestone:
+        raise Error('Unable to find milestone %s' % args.milestone)
+    tasks = charms.searchTasks(milestone=milestone, status="Fix Released")
+
+    contributors = []
+    for btask in tasks:
+        if btask.assignee:
+            contributors.append(btask.assignee.display_name)
+    for contributor in set(contributors):
+        print(contributor)
+
+
+def search(lp, charms, charmers, args):
+    """Searches for bugs targetted to the provided milestone"""
+    lp_args = {}
+    if args.milestone:
+        milestone = charms.getMilestone(name=str(args.milestone))
+        if not milestone:
+            raise Error('Unable to find milestone %s' % args.milestone)
+        else:
+            lp_args['milestone'] = milestone
+    if args.status:
+        lp_args['status'] = args.status
+
+    summary = PrettyTable(["Charm", "Status", "Description", "Owner", "Priority", "Link"])
+    summary.align["Charm"] = 'l'
+    summary.align["Status"] = 'l'
+    summary.align["Description"] = 'l'
+    summary.align["Owner"] = 'l'
+    summary.align["Priority"] = 'l'
+    summary.align["Link"] = 'l'
+    num_tasks = 0
+    bugs = []
+
+    for btask in charms.searchTasks(**lp_args):
+        summary.add_row([btask.bug_target_name.split()[0],
+                         btask.status,
+                         btask.bug.title,
+                         btask.assignee.display_name if btask.assignee else "Unassigned",
+                         btask.importance,
+                         'https://launchpad.net/bugs/%s' % btask.bug.id])
+        bugs.append({
+            'target': btask.bug_target_name.split()[0],
+            'status': btask.status,
+            'title': btask.bug.title,
+            'assignee': btask.assignee.display_name if btask.assignee else "Unassigned",
+            'importance': btask.importance,
+            'link': 'https://launchpad.net/bugs/%s' % btask.bug.id
+        })
+        num_tasks += 1
+
+    Logger.normal('Found %s bug tasks', num_tasks)
+    print(summary)
+
+    if args.html:
+        with open(args.html, 'w') as f:
+            env = Environment(loader=FileSystemLoader('templates'))
+            template = env.get_template('html.j2')
+            f.write(template.render({'bugs': bugs, 'num_bugs': len(bugs)}))
+
+
+def milestone_bump(lp, charms, charmers, args):
+    '''Move all bug tasks that are not Fix Committed/Released to the next milestone'''
+    lp_args = {} #'tags': 'openstack'}
+    if not args.milestone or not args.target_milestone:
+        raise Error('Please provide source and target milestones')
+    if args.milestone:
+        pg_milestone = charms.getMilestone(name=str(args.milestone))
+        lp_args['milestone'] = pg_milestone
+
+    tasks = charms.searchTasks(**lp_args)
+    for btask in tasks:
+        if btask.status not in ['Fix Released', 'Fix Committed']:
+            project = lp.projects[btask.target.name]
+            milestone = project.getMilestone(name=str(args.milestone))
+            target_milestone = project.getMilestone(name=str(args.target_milestone))
+            Logger.normal('Moving bug %s (%s) from milestone %s to milestone %s',
+                          btask.bug.id, btask.bug.title,
+                          args.milestone, args.target_milestone)
+            btask.milestone = target_milestone
+            btask.lp_save()
+
+
+def milestone_assign(lp, charms, charmers, args):
+    '''Assigned 'Fix Committed' or 'Fix Released' bugs to a milestone'''
+    lp_args = {} #'tags': 'openstack'}
+    if not args.milestone:
+        raise Error('Please provide target milestone')
+    tasks = charms.searchTasks(**lp_args)
+    for btask in tasks:
+        if (btask.status in ['Fix Released', 'Fix Committed'] and
+                btask.milestone is None):
+            project = lp.projects[btask.target.name]
+            milestone = project.getMilestone(name=str(args.milestone))
+            if not milestone:
+                Logger.error('Unable to find milestone %s', args.milestone)
+            else:
+                Logger.normal('Assigning bug %s (%s) to milestone %s',
+                              btask.bug.id, btask.bug.title,
+                              args.milestone)
+                btask.milestone = milestone
+                btask.lp_save()
+
+
+def milestone_create(lp, charms, charmers, args):
+    '''Create a milestone in the trunk series for all projects that are part of charms'''
+    if not args.milestone:
+        raise Error('Please provide target milestone')
+    new_milestone = args.milestone
+
+    for project in charms.projects:
+        series = project.getSeries(name='trunk')
+        milestone = project.getMilestone(name=new_milestone)
+        if not milestone:
+            Logger.normal('Adding milestone %s to %s',
+                          args.milestone, project.name)
+            series.newMilestone(name=new_milestone)
+            milestone = project.getMilestone(name=new_milestone)
+        else:
+            Logger.normal('Updating milestone %s for %s',
+                          args.milestone, project.name)
+        milestone.date_targeted = args.target_date
+        milestone.lp_save()
+
+
+def migrate_charm(lp, charms, charmers, args):
+    '''Migrate a charm from the charms distro to a standalone project under openstack-charms'''
+    if not args.charm:
+        raise Error('please provide a charm name to migrate')
+
+    charms_distro = lp.distributions[DISTRO]
+    charm_name = str(args.charm)
+    charm = charms_distro.getSourcePackage(name=charm_name)
+    new_project_name = 'charm-{}'.format(charm_name)
+    if charm:
+        Logger.normal('Migrating charm %s', charm_name)
+        try:
+            charm_project = lp.projects[new_project_name]
+        except KeyError:
+            Logger.normal('Creating new project for %s', charm_name)
+            new_display_name = 'OpenStack {} charm'.format(charm_name)
+            new_summary = (
+                'The {} charm: this LP project is for'
+                ' bug tracking only. Code lives in OpenStack git.'.format(charm_name)
+            )
+            home_page_url = "https://github.com/openstack/charm-{}".format(charm_name)
+            lp.projects.new_project(bug_supervisor=charmers,
+                                    driver=charmers,
+                                    display_name=new_display_name,
+                                    name=new_project_name,
+                                    project_group=charms,
+                                    summary=new_summary,
+                                    title=new_display_name,
+                                    home_page_url=home_page_url,
+                                    licenses=['Apache Licence'])
+            charm_project = lp.projects[new_project_name]
+        charm_project.addBugSubscription(subscriber=charmers)
+        charm_project.lp_save()
+
+    if charm:
+        bug_tasks = charm.searchTasks()
+        for btask in bug_tasks:
+            if not btask.is_complete:
+                Logger.normal('Migrating bug %s for %s',
+                              btask.bug.id, charm_name)
+                try:
+                    new_task = btask.bug.addTask(target=charm_project)
+                    new_task.status = btask.status
+                    new_task.importance = btask.importance
+                    new_task.assignee= btask.assignee
+                    new_task.lp_save()
+                except:
+                    pass
+                # NOTE; mark old bug task as no longer valid
+                btask.status = 'Invalid'
+                btask.lp_save()
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('charm-bug-tool')
+    parser.set_defaults(prog=parser.prog)
+    subparsers = parser.add_subparsers(
+        title="subcommands",
+        description="valid subcommands",
+        help="sub-command help",
+    )
+
+    release_parser = subparsers.add_parser('release', help='Mark bugs targetted to a milestone as "Fix Released"')
+    release_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to use for searching for committed bug tasks"
+    )
+    release_parser.set_defaults(func=release)
+
+    contributors_parser = subparsers.add_parser('contributors', help='Query contributors for a given milestone')
+    contributors_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to use for searching for contributors"
+    )
+    contributors_parser.set_defaults(func=contributors)
+
+
+    search_parser = subparsers.add_parser('search', help='Search for bugs')
+    search_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to use for searching for committed bug tasks"
+    )
+    search_parser.add_argument(
+        "--status",
+        metavar="STATUS",
+        help="Filter bug search by STATUS",
+    )
+    search_parser.add_argument(
+        "--target",
+        metavar="TARGET",
+        help="Filter bug search by TARGET",
+    )
+    search_parser.add_argument(
+        "--html",
+        metavar="HTML",
+        help="File to write HTML format output to",
+    )
+    search_parser.set_defaults(func=search)
+
+    milestone_bump_parser = subparsers.add_parser('milestone-bump', help='Move incomplete bugs between milestones')
+    milestone_bump_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to use for searching for incomplete bugs"
+    )
+    milestone_bump_parser.add_argument(
+        "--target-milestone",
+        metavar="TARGET",
+        help="milestone to migrate incomplete bug tasks to",
+    )
+    milestone_bump_parser.set_defaults(func=milestone_bump)
+
+    milestone_assign_parser = subparsers.add_parser('milestone-assign', help='Assign completed bug not assigned to a milestone')
+    milestone_assign_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to assign bugs to"
+    )
+    milestone_assign_parser.set_defaults(func=milestone_assign)
+
+
+    milestone_create_parser = subparsers.add_parser('milestone-create', help='Create a milestone across all projects in openstack-charms')
+    milestone_create_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to create"
+    )
+    milestone_create_parser.add_argument(
+        "--target-date",
+        metavar="TARGET_DATE",
+        help="target date for milestone"
+    )
+    milestone_create_parser.set_defaults(func=milestone_create)
+
+    migrate_charm_parser = subparsers.add_parser('migrate-charm', help='Migrate and charm and all bug tasks to openstack-charms pg')
+    migrate_charm_parser.add_argument(
+        "--charm",
+        metavar="CHARM",
+        help="charm to migrate to a project"
+    )
+    migrate_charm_parser.set_defaults(func=migrate_charm)
+
+
+    args = parser.parse_args()
+
+    lp = Launchpad.login_with('charm-bug-tool', 'production')
+    charms = lp.project_groups[OPENSTACK_CHARMS]
+    charmers = lp.people['openstack-charmers']
+
+    try:
+        args.func(lp, charms, charmers, args)
+    except Error as e:
+        raise SystemExit(
+            '{prog}: {msg}'.format(
+                prog=args.prog,
+                msg=e,
+            )
+        )
