@@ -1,15 +1,18 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import argparse
 import sys
+import logging
 
 from prettytable import PrettyTable
 from launchpadlib.launchpad import Launchpad
-from ubuntutools.logger import Logger
 from jinja2 import Environment, FileSystemLoader
 
 OPENSTACK_CHARMS = "openstack-charms"
 DISTRO = 'charms'
+
+Logger = logging.getLogger(__name__)
+
 
 class Error(Exception):
     """
@@ -31,7 +34,7 @@ def release(lp, charms, charmers, args):
         raise Error('Unable to find milestone %s' % args.milestone)
     tasks = charms.searchTasks(milestone=milestone, status="Fix Committed")
     for btask in tasks:
-        Logger.normal('Marking bug %s as Fix Released', btask)
+        Logger.info('Marking bug %s as Fix Released', btask)
         btask.status = 'Fix Released'
         btask.lp_save()
 
@@ -91,7 +94,7 @@ def search(lp, charms, charmers, args):
         })
         num_tasks += 1
 
-    Logger.normal('Found %s bug tasks', num_tasks)
+    Logger.info('Found %s bug tasks', num_tasks)
     print(summary)
 
     if args.html:
@@ -116,7 +119,7 @@ def milestone_bump(lp, charms, charmers, args):
             project = lp.projects[btask.target.name]
             milestone = project.getMilestone(name=str(args.milestone))
             target_milestone = project.getMilestone(name=str(args.target_milestone))
-            Logger.normal('Moving bug %s (%s) from milestone %s to milestone %s',
+            Logger.info('Moving bug %s (%s) from milestone %s to milestone %s',
                           btask.bug.id, btask.bug.title,
                           args.milestone, args.target_milestone)
             btask.milestone = target_milestone
@@ -137,7 +140,7 @@ def milestone_assign(lp, charms, charmers, args):
             if not milestone:
                 Logger.error('Unable to find milestone %s', args.milestone)
             else:
-                Logger.normal('Assigning bug %s (%s) to milestone %s',
+                Logger.info('Assigning bug %s (%s) to milestone %s',
                               btask.bug.id, btask.bug.title,
                               args.milestone)
                 btask.milestone = milestone
@@ -154,12 +157,12 @@ def milestone_create(lp, charms, charmers, args):
         series = project.getSeries(name='trunk')
         milestone = project.getMilestone(name=new_milestone)
         if not milestone:
-            Logger.normal('Adding milestone %s to %s',
+            Logger.info('Adding milestone %s to %s',
                           args.milestone, project.name)
             series.newMilestone(name=new_milestone)
             milestone = project.getMilestone(name=new_milestone)
         else:
-            Logger.normal('Updating milestone %s for %s',
+            Logger.info('Updating milestone %s for %s',
                           args.milestone, project.name)
         milestone.date_targeted = args.target_date
         milestone.lp_save()
@@ -175,11 +178,11 @@ def migrate_charm(lp, charms, charmers, args):
     charm = charms_distro.getSourcePackage(name=charm_name)
     new_project_name = 'charm-{}'.format(charm_name)
     if charm:
-        Logger.normal('Migrating charm %s', charm_name)
+        Logger.info('Migrating charm %s', charm_name)
         try:
             charm_project = lp.projects[new_project_name]
         except KeyError:
-            Logger.normal('Creating new project for %s', charm_name)
+            Logger.info('Creating new project for %s', charm_name)
             new_display_name = 'OpenStack {} charm'.format(charm_name)
             new_summary = (
                 'The {} charm: this LP project is for'
@@ -203,7 +206,7 @@ def migrate_charm(lp, charms, charmers, args):
         bug_tasks = charm.searchTasks()
         for btask in bug_tasks:
             if not btask.is_complete:
-                Logger.normal('Migrating bug %s for %s',
+                Logger.info('Migrating bug %s for %s',
                               btask.bug.id, charm_name)
                 try:
                     new_task = btask.bug.addTask(target=charm_project)
