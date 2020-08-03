@@ -127,6 +127,26 @@ def milestone_bump(lp, charms, charmers, args):
             btask.lp_save()
 
 
+def milestone_clear(lp, charms, charmers, args):
+    '''Remove milestone from all bug tasks that are not Fix Committed/Released'''
+    lp_args = {} #'tags': 'openstack'}
+    if not args.milestone:
+        raise Error('Please provide a milestones')
+    if args.milestone:
+        pg_milestone = charms.getMilestone(name=str(args.milestone))
+        lp_args['milestone'] = pg_milestone
+
+    tasks = charms.searchTasks(**lp_args)
+    for btask in tasks:
+        if btask.status not in ['Fix Released', 'Fix Committed']:
+            project = lp.projects[btask.target.name]
+            milestone = project.getMilestone(name=str(args.milestone))
+            Logger.info('Clearing milestone from bug %s (%s)',
+                          btask.bug.id, btask.bug.title)
+            btask.milestone = None
+            btask.lp_save()
+
+
 def milestone_assign(lp, charms, charmers, args):
     '''Assigned 'Fix Committed' or 'Fix Released' bugs to a milestone'''
     lp_args = {} #'tags': 'openstack'}
@@ -282,6 +302,14 @@ if __name__ == '__main__':
         help="milestone to migrate incomplete bug tasks to",
     )
     milestone_bump_parser.set_defaults(func=milestone_bump)
+
+    milestone_clear_parser = subparsers.add_parser('milestone-clear', help='Clear milestone from incomplete bugs')
+    milestone_clear_parser.add_argument(
+        "--milestone",
+        metavar="MILESTONE",
+        help="milestone to clear bugs from"
+    )
+    milestone_clear_parser.set_defaults(func=milestone_clear)
 
     milestone_assign_parser = subparsers.add_parser('milestone-assign', help='Assign completed bug not assigned to a milestone')
     milestone_assign_parser.add_argument(
